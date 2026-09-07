@@ -234,18 +234,18 @@ function direction_pressures(label, B, L_dim, h, theta_deg, normal_to_ridge, V, 
 end
 
 """
-    compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12,
+    compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12, design_code,
                              risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
-                             ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true,
-                             design_code="LRFD")
+                             ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
 
 Compute ASCE 7-22 MWFRS gable roof pressures (Ch. 27, Directional Procedure,
 Part 1: Rigid Buildings of All Heights, Fig. 27.3-1) for both orthogonal wind
 directions of an enclosed rigid building.
 
-`design_code` is `"LRFD"` (strength-level, the default) or `"ASD"`; ASD pressures
-are the strength-level pressures (with the Sec. 27.1.5 minimum already applied)
-times 0.6 per Sec. 2.4.1.
+`design_code` is `"LRFD"` (strength-level) or `"ASD"` -- required, no default,
+so every caller states explicitly which one it wants. ASD pressures are the
+strength-level pressures (with the Sec. 27.1.5 minimum already applied) times
+0.6 per Sec. 2.4.1.
 
 Returns a NamedTuple:
   .results       -- 2-element vector (Direction 1, Direction 2), each with
@@ -255,10 +255,9 @@ Returns a NamedTuple:
   .design_code   -- "LRFD" or "ASD", echoed back for reporting
 plus the resolved inputs for convenience in reporting.
 """
-function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12,
+function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12, design_code,
                                    risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
-                                   ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true,
-                                   design_code="LRFD")
+                                   ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
     ridge_parallel_to in ("long", "short") || error("ridge_parallel_to must be \"long\" or \"short\"")
     design_code in ("ASD", "LRFD") || error("design_code must be \"ASD\" or \"LRFD\"; got \"$design_code\"")
     factor = design_code == "ASD" ? ASD_FACTOR : 1.0
