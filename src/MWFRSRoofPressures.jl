@@ -30,6 +30,9 @@ const TERRAIN_CONSTANTS = Dict(
 
 const GCPI_ENCLOSED = 0.18   # Table 26.13-1, enclosed buildings, +/-
 
+# Sec. 2.4.1: ASD-level wind loads = 0.6 x strength-level (LRFD) wind loads.
+const ASD_FACTOR = 0.6
+
 # Roof Cp, normal to ridge, theta = 10-45 deg (Fig. 27.3-1), by h/L row.
 const HL_ROWS    = (0.25, 0.5, 1.0)
 const THETA_BREAKS = (10.0, 15.0, 20.0, 25.0, 30.0, 35.0, 45.0)
@@ -184,8 +187,10 @@ design_pressure(qh::Real, Kd::Real, G::Real, Cp::Real, GCpi_signed::Real) = qh *
 """Sec. 27.1.5 minimum roof pressure: magnitude not less than 8 psf (vs. 16 psf for walls)."""
 roof_minimum(p::Real) = abs(p) < 8.0 ? copysign(8.0, p) : p
 
-"""One Cp load case -> (Cp, external pressure, +/-GCpi net pressures, controlling sign)."""
-function case_pressure(qh::Real, Kd::Real, G::Real, Cp::Real, apply_min::Bool)
+"""One Cp load case -> (Cp, external pressure, +/-GCpi net pressures, controlling sign). `factor` is
+1.0 for LRFD (strength-level) output, or ASD_FACTOR (0.6) for ASD -- applied after the Sec. 27.1.5
+minimum, which is itself a strength-level threshold (Sec. 2.4.1)."""
+function case_pressure(qh::Real, Kd::Real, G::Real, Cp::Real, apply_min::Bool, factor::Real)
     p_ext = qh * Kd * G * Cp
     p_pos = design_pressure(qh, Kd, G, Cp, +GCPI_ENCLOSED)
     p_neg = design_pressure(qh, Kd, G, Cp, -GCPI_ENCLOSED)
@@ -193,16 +198,16 @@ function case_pressure(qh::Real, Kd::Real, G::Real, Cp::Real, apply_min::Bool)
         p_pos, p_neg = roof_minimum(p_pos), roof_minimum(p_neg)
     end
     controls = abs(p_pos) >= abs(p_neg) ? "+GCpi" : "-GCpi"
-    return (Cp=Cp, p_ext=p_ext, p_pos=p_pos, p_neg=p_neg, controls=controls)
+    return (Cp=Cp, p_ext=p_ext * factor, p_pos=p_pos * factor, p_neg=p_neg * factor, controls=controls)
 end
 
 """Roof pressure cases for one wind direction. B = building width normal to wind; L_dim = building depth parallel to
 wind (used for h/L and, in the zone table, measured along this dimension from the windward edge)."""
 function direction_pressures(label, B, L_dim, h, theta_deg, normal_to_ridge, V, exposure, Kd, Kzt, Ke, G,
-                              apply_roof_minimum, apply_area_reduction)
+                              apply_roof_minimum, apply_area_reduction, factor)
     h_over_L = h / L_dim
     qh, Kh = velocity_pressure(h, V, Kzt, Ke, exposure)
-    gcpi_psf = qh * Kd * GCPI_ENCLOSED
+    gcpi_psf = qh * Kd * GCPI_ENCLOSED * factor
 
     use_zone_table = !normal_to_ridge || theta_deg < 10.0
 
@@ -212,14 +217,14 @@ function direction_pressures(label, B, L_dim, h, theta_deg, normal_to_ridge, V, 
         cp_ww_neg = windward_neg_cp(theta_deg, h_over_L)
         cp_ww_pos = windward_pos_cp(theta_deg, h_over_L)
         cp_lw     = leeward_cp(theta_deg, h_over_L)
-        push!(cases, ("Windward roof (suction case)",  case_pressure(qh, Kd, G, cp_ww_neg, apply_roof_minimum)))
-        push!(cases, ("Windward roof (positive case)", case_pressure(qh, Kd, G, cp_ww_pos, apply_roof_minimum)))
-        push!(cases, ("Leeward roof",                   case_pressure(qh, Kd, G, cp_lw,     apply_roof_minimum)))
+        push!(cases, ("Windward roof (suction case)",  case_pressure(qh, Kd, G, cp_ww_neg, apply_roof_minimum, factor)))
+        push!(cases, ("Windward roof (positive case)", case_pressure(qh, Kd, G, cp_ww_pos, apply_roof_minimum, factor)))
+        push!(cases, ("Leeward roof",                   case_pressure(qh, Kd, G, cp_lw,     apply_roof_minimum, factor)))
     else
         zones = zone_table(h, L_dim, h_over_L, B, theta_deg, apply_area_reduction)
         for z in zones
-            push!(cases, ("$(z.label) ft, Case (a)", case_pressure(qh, Kd, G, z.cp_a, apply_roof_minimum)))
-            push!(cases, ("$(z.label) ft, Case (b)", case_pressure(qh, Kd, G, z.cp_b, apply_roof_minimum)))
+            push!(cases, ("$(z.label) ft, Case (a)", case_pressure(qh, Kd, G, z.cp_a, apply_roof_minimum, factor)))
+            push!(cases, ("$(z.label) ft, Case (b)", case_pressure(qh, Kd, G, z.cp_b, apply_roof_minimum, factor)))
         end
     end
 
@@ -231,23 +236,32 @@ end
 """
     compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12,
                              risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
-                             ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
+                             ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true,
+                             design_code="LRFD")
 
 Compute ASCE 7-22 MWFRS gable roof pressures (Ch. 27, Directional Procedure,
 Part 1: Rigid Buildings of All Heights, Fig. 27.3-1) for both orthogonal wind
 directions of an enclosed rigid building.
+
+`design_code` is `"LRFD"` (strength-level, the default) or `"ASD"`; ASD pressures
+are the strength-level pressures (with the Sec. 27.1.5 minimum already applied)
+times 0.6 per Sec. 2.4.1.
 
 Returns a NamedTuple:
   .results       -- 2-element vector (Direction 1, Direction 2), each with
                      .cases (label => case_pressure NamedTuple pairs) and,
                      when the zone table applies, .zones (raw zone geometry)
   .h, .theta_deg -- roof reference height and slope angle, deg
+  .design_code   -- "LRFD" or "ASD", echoed back for reporting
 plus the resolved inputs for convenience in reporting.
 """
 function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12,
                                    risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
-                                   ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
+                                   ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true,
+                                   design_code="LRFD")
     ridge_parallel_to in ("long", "short") || error("ridge_parallel_to must be \"long\" or \"short\"")
+    design_code in ("ASD", "LRFD") || error("design_code must be \"ASD\" or \"LRFD\"; got \"$design_code\"")
+    factor = design_code == "ASD" ? ASD_FACTOR : 1.0
     theta_deg = rad2deg(atan(roof_slope_rise_per_12 / 12))
 
     dir1_normal_to_ridge = ridge_parallel_to == "long"
@@ -256,14 +270,14 @@ function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slop
     results = [
         direction_pressures("Direction 1 (wind normal to the long wall; B=$long_dim ft, L=$short_dim ft)",
                              long_dim, short_dim, h, theta_deg, dir1_normal_to_ridge,
-                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction),
+                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor),
         direction_pressures("Direction 2 (wind normal to the short wall; B=$short_dim ft, L=$long_dim ft)",
                              short_dim, long_dim, h, theta_deg, dir2_normal_to_ridge,
-                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction),
+                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor),
     ]
 
     return (
-        results=results, h=h, theta_deg=theta_deg,
+        results=results, h=h, theta_deg=theta_deg, design_code=design_code,
         V=V, risk_category=risk_category, exposure=exposure, Kd=Kd, Kzt=Kzt, Ke=Ke, G=G,
         apply_roof_minimum=apply_roof_minimum, apply_area_reduction=apply_area_reduction,
         long_dim=long_dim, short_dim=short_dim, ridge_parallel_to=ridge_parallel_to,
