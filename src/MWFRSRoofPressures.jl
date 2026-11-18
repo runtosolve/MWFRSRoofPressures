@@ -4,8 +4,12 @@ export compute_roof_pressures
 
 # =============================================================================
 # ASCE 7-22 MWFRS Roof Wind Pressures -- Directional Procedure (Ch. 26-27)
-# Gable roof, enclosed rigid building. Figure 27.3-1 roof Cp, Part 1 (Rigid
-# buildings of all heights)
+# Gable or hip roof, enclosed rigid building. Figure 27.3-1 roof Cp, Part 1 (Rigid
+# buildings of all heights; Sec. 27.3.1 lists Fig. 27.3-1 for flat, gable and hip roofs).
+# Hip roofs (roof_type=:hip), theta >= 10 deg: for each wind direction the slopes facing
+# the wind take the normal-to-ridge windward/leeward Cp at theta and that direction's h/L,
+# and the side slopes take the parallel-to-ridge zone table (ASCE wind guide hip example G9).
+# theta < 10 deg: zone table only, as for gable roofs.
 #
 # Table values transcribed from ASCE 7-10/16/22 Figure 27.3-1 (unchanged
 # across these editions)
@@ -204,16 +208,26 @@ end
 """Roof pressure cases for one wind direction. B = building width normal to wind; L_dim = building depth parallel to
 wind (used for h/L and, in the zone table, measured along this dimension from the windward edge)."""
 function direction_pressures(label, B, L_dim, h, theta_deg, normal_to_ridge, V, exposure, Kd, Kzt, Ke, G,
-                              apply_roof_minimum, apply_area_reduction, factor)
+                              apply_roof_minimum, apply_area_reduction, factor; hip=false)
     h_over_L = h / L_dim
     qh, Kh = velocity_pressure(h, V, Kzt, Ke, exposure)
     gcpi_psf = qh * Kd * GCPI_ENCLOSED * factor
 
     use_zone_table = !normal_to_ridge || theta_deg < 10.0
+    hip_faces = hip && theta_deg >= 10.0      # hip: sloped faces toward the wind in every direction, side slopes by zone table
 
     cases = Tuple{String,NamedTuple}[]
     zones = nothing
-    if !use_zone_table
+    if hip_faces
+        push!(cases, ("Windward roof (suction case)",  case_pressure(qh, Kd, G, windward_neg_cp(theta_deg, h_over_L), apply_roof_minimum, factor)))
+        push!(cases, ("Windward roof (positive case)", case_pressure(qh, Kd, G, windward_pos_cp(theta_deg, h_over_L), apply_roof_minimum, factor)))
+        push!(cases, ("Leeward roof",                   case_pressure(qh, Kd, G, leeward_cp(theta_deg, h_over_L), apply_roof_minimum, factor)))
+        zones = zone_table(h, L_dim, h_over_L, B, theta_deg, apply_area_reduction)
+        for z in zones
+            push!(cases, ("Side slopes, $(z.label) ft, Case (a)", case_pressure(qh, Kd, G, z.cp_a, apply_roof_minimum, factor)))
+            push!(cases, ("Side slopes, $(z.label) ft, Case (b)", case_pressure(qh, Kd, G, z.cp_b, apply_roof_minimum, factor)))
+        end
+    elseif !use_zone_table
         cp_ww_neg = windward_neg_cp(theta_deg, h_over_L)
         cp_ww_pos = windward_pos_cp(theta_deg, h_over_L)
         cp_lw     = leeward_cp(theta_deg, h_over_L)
@@ -229,18 +243,24 @@ function direction_pressures(label, B, L_dim, h, theta_deg, normal_to_ridge, V, 
     end
 
     return (label=label, B=B, L=L_dim, h_over_L=h_over_L, qh=qh, Kh=Kh, gcpi_psf=gcpi_psf,
-            normal_to_ridge=normal_to_ridge, use_zone_table=use_zone_table, theta_deg=theta_deg,
+            normal_to_ridge=normal_to_ridge, use_zone_table=use_zone_table && !hip_faces, theta_deg=theta_deg,
             cases=cases, zones=zones)
 end
 
 """
     compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12, design_code,
-                             risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
+                             roof_type=:gable, risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
                              ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
 
-Compute ASCE 7-22 MWFRS gable roof pressures (Ch. 27, Directional Procedure,
-Part 1: Rigid Buildings of All Heights, Fig. 27.3-1) for both orthogonal wind
-directions of an enclosed rigid building.
+Compute ASCE 7-22 MWFRS gable (`roof_type=:gable`, the default) or hip (`roof_type=:hip`) roof
+pressures (Ch. 27, Directional Procedure, Part 1: Rigid Buildings of All Heights, Fig. 27.3-1)
+for both orthogonal wind directions of an enclosed rigid building.
+
+Hip roofs with theta >= 10 deg: in each direction the slopes facing the wind get the windward
+(suction and positive cases) and leeward Cp at theta and that direction's h/L, and the side
+slopes get the parallel-to-ridge zone table, labeled "Side slopes, ...". Below 10 deg a hip roof
+uses the zone table in both directions, the same as a gable roof. `ridge_parallel_to` is
+ignored for hip roofs except in the direction labels.
 
 `design_code` is `"LRFD"` (strength-level) or `"ASD"` -- required, no default,
 so every caller states explicitly which one it wants. ASD pressures are the
@@ -252,14 +272,17 @@ Returns a NamedTuple:
                      .cases (label => case_pressure NamedTuple pairs) and,
                      when the zone table applies, .zones (raw zone geometry)
   .h, .theta_deg -- roof reference height and slope angle, deg
+  .roof_type     -- :gable or :hip
   .design_code   -- "LRFD" or "ASD", echoed back for reporting
 plus the resolved inputs for convenience in reporting.
 """
 function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slope_rise_per_12, design_code,
-                                   risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
+                                   roof_type=:gable, risk_category="II", Kd=0.85, Kzt=1.0, Ke=1.0, G=0.85,
                                    ridge_parallel_to="long", apply_roof_minimum=true, apply_area_reduction=true)
     ridge_parallel_to in ("long", "short") || error("ridge_parallel_to must be \"long\" or \"short\"")
     design_code in ("ASD", "LRFD") || error("design_code must be \"ASD\" or \"LRFD\"; got \"$design_code\"")
+    roof_type in (:gable, :hip) || error("roof_type must be :gable or :hip; got :$roof_type")
+    hip = roof_type == :hip
     factor = design_code == "ASD" ? ASD_FACTOR : 1.0
     theta_deg = rad2deg(atan(roof_slope_rise_per_12 / 12))
 
@@ -269,14 +292,14 @@ function compute_roof_pressures(; V, exposure, h, long_dim, short_dim, roof_slop
     results = [
         direction_pressures("Direction 1 (wind normal to the long wall; B=$long_dim ft, L=$short_dim ft)",
                              long_dim, short_dim, h, theta_deg, dir1_normal_to_ridge,
-                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor),
+                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor; hip=hip),
         direction_pressures("Direction 2 (wind normal to the short wall; B=$short_dim ft, L=$long_dim ft)",
                              short_dim, long_dim, h, theta_deg, dir2_normal_to_ridge,
-                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor),
+                             V, exposure, Kd, Kzt, Ke, G, apply_roof_minimum, apply_area_reduction, factor; hip=hip),
     ]
 
     return (
-        results=results, h=h, theta_deg=theta_deg, design_code=design_code,
+        results=results, h=h, theta_deg=theta_deg, design_code=design_code, roof_type=roof_type,
         V=V, risk_category=risk_category, exposure=exposure, Kd=Kd, Kzt=Kzt, Ke=Ke, G=G,
         apply_roof_minimum=apply_roof_minimum, apply_area_reduction=apply_area_reduction,
         long_dim=long_dim, short_dim=short_dim, ridge_parallel_to=ridge_parallel_to,
